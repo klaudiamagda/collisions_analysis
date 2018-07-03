@@ -1,0 +1,600 @@
+---
+title: "| Solution 49x \n| Technical Assesment\n"
+author: "Klaudia Magda"
+date: "June 27th, 2018"
+output:
+  html_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+fig_width: 15
+fig_height: 15
+---
+
+
+
+```{r include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library('ggmap')
+library(jsonlite)
+library("RSocrata")
+library(reshape)
+library(plotly)
+library(htmltools)
+library(tidyr)
+library(lubridate)
+library(GGally)
+```
+
+```{r eval=FALSE, cache=TRUE, include=FALSE}
+dataNYC <- as.data.frame(read.socrata("https://data.cityofnewyork.us/resource/qiz3-axqb.json"))
+dataNYC <- subset(dataNYC, date <= as.POSIXct("2017-12-31"))
+saveRDS(dataNYC, file="data_NYC.rds")
+```
+
+
+# Case Study 
+
+`New York Police Department` cares about citizens of New York and NYPD hired Data Scientist, who will provide answer for following question:
+
+`How can we improve New York City in order to reduce vehicle collsions and improve safety on roads?` 
+
+Answer can be provided with comprehensive `data analysis` which enables to understand main factors that cause vehicle crashes.
+
+Aim of this project is to investigate main contributions that have an affect on the safety on roads by providing answers for following questions:
+
+
+**1. When collisions happen the most frequently? Is it correlated with specific months, weekdays or hours?**
+
+
+
+**2. Where collisions appear the most frequently? Which spots are the most dangerous ones?**
+
+
+
+**3. What are the main factors that contribute collisions in NYC?**
+
+
+
+
+```{r pressure, echo=FALSE, fig.cap="Source:  https://media.architecturaldigest.com/photos/5699802bc6772b7614567435/4:3/w_768/new-york-city-guide.jpg", fig.align="center"}
+knitr::include_graphics('./nyc.jpg')
+source("functions.R")
+
+
+```
+
+```{r include=FALSE}
+Sys.setlocale("LC_TIME", "C")
+weekdays(Sys.Date()+0:6)
+
+```
+
+```{r, echo = TRUE}
+
+dataNYC <- readRDS("data_NYC.rds")
+glimpse(dataNYC)
+```
+
+The vehicle collision data was collected by the New York Police Department and published by NYC OpenData.
+
+Source: https://data.cityofnewyork.us/Public-Safety/NYPD-Motor-Vehicle-Collisions/h9gi-nx95
+
+The motor vehicle collision dataset includes the date and time, location (as borough, street names, zip code and latitude and longitude coordinates), injuries and fatalities, vehicle number and types, and related factors for almost 1.2 million collisions in New York City during 5 years (from 1st July 2012 until 31st December 2017).
+
+Each observation contains is related to 1 collision.
+
+# Data Cleansing
+
+Aim of this section is to improve quality of data. Columns will be renamed, data-types need to be checked and values of variables must be checked.
+
+## Renaming Variables
+
+
+```{r, echo=TRUE}
+data=dataNYC
+names(data) <- gsub("number_of_", "", names(data), fixed = TRUE)
+names(data) <- gsub("_", ".", names(data), fixed = TRUE)
+names(data) <- gsub("code1", "CODE.1", names(data), fixed = TRUE)
+names(data) <- gsub("code2", "CODE.2", names(data), fixed = TRUE)
+names(data) <- gsub("code3", "CODE.3", names(data), fixed = TRUE)
+colnames(data)[c(20, 23, 7, 6)] <-c("UNIQUE.KEY", "ZIP.CODE", "LOCATION.COORDINATES", "LOCATION.TYPE")
+names(data) <- toupper(names(data))
+colnames(data)
+```
+
+## Dropping Variables
+
+4 variables will be dropped. Dataframe will have less columns, what will accelerate calculations on computer. 
+
+```{r, echo=TRUE}
+length(unique(data$UNIQUE.KEY)) == nrow(data)
+data<-subset(data, select=-c(UNIQUE.KEY, ZIP.CODE, LOCATION.COORDINATES, LOCATION.TYPE))
+colnames(data)
+```
+
+## Data Types
+Conversion of variables into correct data types.
+
+```{r, echo=TRUE}
+
+data$BOROUGH<-as.factor(data$BOROUGH)
+data$TIME<-as.POSIXct(data$TIME,format="%H:%M")
+data$TIME<-format(data$TIME, format = "%H:%M")
+data$LATITUDE<-as.numeric(data$LATITUDE)
+data$LONGITUDE<-as.numeric(data$LONGITUDE)
+data$YEAR<-year(data$DATE)
+data$MONTH<-month(data$DATE)
+data$WEEKDAY<-weekdays(data$DATE)
+data$HOUR<-format(as.POSIXct(data$TIME,format="%H:%M"),"%H")
+
+col_names_vect<-colnames(data)
+
+factor_vehicle<-col_names_vect[grepl("FACTOR", col_names_vect)]
+vehicle_type<-col_names_vect[grepl("TYPE", col_names_vect)]
+street<-vehicles<-col_names_vect[grepl("STREET", col_names_vect)]
+injured<-vehicles<-col_names_vect[grepl("INJURED", col_names_vect)]
+killed<-vehicles<-col_names_vect[grepl("KILLED", col_names_vect)]
+
+#create vectors with factor and numeric column names
+factor_col<-c(factor_vehicle, vehicle_type, street)
+numeric_col<-c(injured,killed)
+
+#change type 
+data[factor_col] <- lapply(data[factor_col], as.factor)
+data[numeric_col] <- lapply(data[numeric_col], as.integer)
+
+str(data)
+
+
+```
+
+
+## Correct range of values
+
+Let's check if in our dataset has unusual values.
+
+```{r, echo=TRUE}
+summary(data)
+```
+
+From this summarision, we can notice that we have plenty of missing values, however these will be analyzed later. `LONGITUDE` variable has several values -200, which are our of the range - Longitude for NYC is around -74. 
+
+```{r, include=FALSE}
+data<-data[data$LONGITUDE > -76 & data$LONGITUDE < - 72,]
+#apply(data, 2, function(x) gsub("^$|^ $", NA, x))
+#summary(data)
+```
+
+## Missing Values 
+As we can see on above summary - there are plenty of missing values in this dataset. Visualization below represents amount of missing values in every column.
+```{r, echo=TRUE, warning=FALSE}
+missing_plot<-data %>% summarize_all(funs(sum(is.na(.))/length(.))) %>% gather %>% ggplot(aes(x = reorder(key, value), y = value)) + geom_bar(stat = "identity", fill = "blue") + coord_flip() + xlab("Variables") + ylab("Missing values percentage")
+ggplotly(missing_plot, tooltip=c("y"))
+```
+We can notice that over 90% of data is missing for following columns:
+
+VEHICLE.TYPE.CODE.3
+
+
+VEHICLE.TYPE.CODE.4
+
+
+VEHICLE.TYPE.CODE.5
+
+
+CONTRIBUTING.FACTOR.VEHICLE.3
+
+
+CONTRIBUTING.FACTOR.VEHICLE.4
+
+
+CONTRIBUTING.FACTOR.VEHICLE.5
+
+This shows that less than 10% of collisions in NYC contain more than 2 vehicles. These 6 columns will be dropped. Moreover, We can notice that columns such as `LATITUDE` and `LONGITUDE` have the same amount of missing value with other columns.   
+```{r, echo=TRUE}
+missing_data<-data[is.na(data$LATITUDE),]
+print(paste0("There are ",nrow(missing_data)," missing observations"))
+colMeans(is.na(missing_data))
+data<-data[!is.na(data$LATITUDE),]
+
+```
+
+
+
+```{r, echo=TRUE}
+missing_plot2<-data %>% summarize_all(funs(sum(is.na(.))/length(.))) %>% gather %>% ggplot(aes(x = reorder(key, value), y = value)) + geom_bar(stat = "identity", fill = "green") + coord_flip() + xlab("Variables") + ylab("Missing values percentage")
+missing_plot2
+```
+
+```{r, echo=TRUE}
+col_names_vect<-colnames(data)
+
+multicars1<-col_names_vect[grepl("VEHICLE.3", col_names_vect)]
+multicars2<-col_names_vect[grepl("VEHICLE.4", col_names_vect)]
+multicars3<-col_names_vect[grepl("VEHICLE.5", col_names_vect)]
+multicars4<-col_names_vect[grepl("CODE.3", col_names_vect)]
+multicars5<-col_names_vect[grepl("CODE.4", col_names_vect)]
+multicars6<-col_names_vect[grepl("CODE.5", col_names_vect)]
+latitude<-col_names_vect[grepl("LATITUDE", col_names_vect)]
+longitude<-col_names_vect[grepl("LONGITUDE", col_names_vect)]
+
+data_copy=data
+
+multi_collision_with_location<-c(multicars1, multicars2, multicars3, multicars4, multicars5, multicars6, latitude, longitude)
+
+multi_collision_without_location<-multi_collision_with_location [! multi_collision_with_location %in% c(latitude, longitude)]
+
+data_multi_collision_with_location<-data[multi_collision_with_location]
+
+data <- data[, !colnames(data) %in% multi_collision_without_location]
+
+```
+
+
+## Highly - Correlated Variables
+```{r, echo=TRUE}
+num <- data %>% select(which(sapply(data, is.numeric)))
+num <- num[complete.cases(num),]
+corrplot(cor(num), method="circle")
+```
+
+Correlation plot shows that `PERSONS.INJURED` and `PERSONS.KILLED` have a strong positive correlation with columns such as `MOTORIST.INJURED` or `PEDESTRAINS.INJURED`. 
+
+There are 2 insights to notice. 
+
+1. Insight about deaths: mostly pedestrians were killed, then motorists.
+2. In case of injury: majority of injuries belongs to motorists.
+
+
+```{r, eval=FALSE, include=FALSE}
+## Outliers 
+#ggplot(data = melt(data[,numeric_col]), aes(x=variable, y=value)) + geom_boxplot(aes(fill=variable)) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Time Analysis 
+
+
+## Collisions by Year
+```{r, echo=TRUE}
+
+yearDistribution<-ggplot(data, aes(YEAR)) +   
+  geom_bar(aes(fill = BOROUGH), position = "dodge", stat="count") +scale_fill_brewer(palette = "Set2") + xlab("Year") + ylab("Amount of collisions") + ggtitle("Number of Collisions Per Year for each Borough")
+yearDistribution  #+ geom_text(stat='count', aes(label=..count..), vjust=-1)
+
+#ggplotly(yearDistribution, tooltip = c("y"))
+
+
+
+```
+2012 contains less collisions, because we retrieved data from 1st of July.
+
+## Collisions by Month 
+```{r, echo=TRUE}
+monthDistribution<-ggplot(data,aes(MONTH)) + geom_bar(colour='red', fill='blue', stat = "count") + ggtitle('Number of accidents in dataset for each Borough') + scale_x_discrete(limits = month.abb) + xlab("Month") + ylab("Amount of collisions") + scale_fill_brewer(palette = "Set1") +facet_wrap(~BOROUGH) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplotly(monthDistribution, tooltip = c("y")) 
+```
+
+
+
+## Heatmap Month/Year
+```{r, echo=TRUE}
+df_heatmap<-data[,c("YEAR", "MONTH", "TIME")]
+df_heatmap <- aggregate(TIME ~ YEAR + MONTH, data = df_heatmap, FUN = length)
+names(df_heatmap) <- c("YEAR", "MONTH", "COUNT")
+df_heatmap$MONTH <- as.factor(month.abb[df_heatmap$MONTH])
+```
+
+```{r, echo=TRUE}  
+hm<-create_heatmap(df_heatmap)
+hm + geom_text(aes(label=COUNT))
+
+ggplotly(hm, tooltip = c("COUNT"))
+```
+
+### Deaths
+```{r, echo=TRUE}
+
+
+df_heatmap_kill<-data[,c("YEAR", "MONTH", "PERSONS.KILLED")]
+PERSONS.KILLED<-data$PERSONS.KILLED
+df_heatmap_kill<-aggregate_heatmap(df_heatmap_kill, PERSONS.KILLED)
+hm_kill<-create_heatmap(df_heatmap_kill)
+hm_kill + geom_text(aes(label=COUNT))
+
+
+#print(paste0("There have been ",sum(PERSONS.KILLED)," death accidents since 01/07/2012 until 31/12/2017")))
+
+```
+
+
+### Injuries
+```{r, echo=TRUE}
+
+df_heatmap_injured <- data[,c("YEAR", "MONTH", "PERSONS.INJURED")]
+PERSONS.INJURED <- df_heatmap_injured$PERSONS.INJURED
+df_heatmap_injured <- aggregate_heatmap(df_heatmap_injured, PERSONS.INJURED)
+hm_injured <- create_heatmap(df_heatmap_injured)
+hm_injured + geom_text(aes(label=COUNT))
+
+#print(paste0("There have been ",sum(data$PERSONS.INJURED)," death accidents since 01/07/2012 until 31/12/2017")))
+```
+
+## Collisions by Weekday
+```{r, echo=TRUE}
+
+weekdayPlot<-ggplot(data,aes(WEEKDAY)) + geom_bar(colour="black", fill="purple") + ggtitle("Accidents by weekday") +ylab('Accidents') + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + scale_x_discrete(labels = paste0(weekdays(Sys.Date()+4:10)))
+
+weekdayPlot
+
+
+#ggplotly(weekdayPlot)
+
+
+```
+
+```{r, echo=TRUE}
+weekdayPlot + facet_wrap(~BOROUGH)
+```
+
+## Collisions per Hour
+```{r, echo=TRUE}
+plotHour<-ggplot(data) + geom_line(aes(HOUR),group = 1,stat = "count", color = "steelblue") + xlab("Hour") 
+plotHour
+
+```   
+
+```{r, echo=TRUE}
+plotHour + facet_wrap(~BOROUGH) 
+```   
+
+```{r, echo=TRUE}
+plotHour + facet_wrap(~YEAR)
+```
+
+```{r, echo=TRUE}
+plotHour + facet_wrap(~WEEKDAY)
+```
+
+# Location Analysis
+```{r echo=TRUE, warning=FALSE}
+library('ggmap')
+map <- get_map("new york", zoom = 10)
+ggmap(map) + geom_point(data = data, aes(x = LONGITUDE, y = LATITUDE, color=BOROUGH))
+
+
+```
+
+## Injuries Location
+
+```{r, echo=TRUE}
+
+df_injured<-data[,c("LATITUDE","LONGITUDE","PEDESTRIANS.INJURED","CYCLIST.INJURED","MOTORIST.INJURED")] %>% gather(TYPE,VALUE,3:5) %>% na.omit() %>% group_by(LATITUDE,LONGITUDE,TYPE) %>% summarise(TOTAL=sum(VALUE,na.rm=T)) %>% filter(TOTAL!=0)
+
+
+```
+
+
+### Pedestrians
+```{r, echo=TRUE}
+
+ type<-"PEDESTRIANS.INJURED"
+ pedestrianInjured <-geo_plot(map,df_injured,type)
+ pedestrianInjured
+
+```
+
+### Over 20 pedestrians Injured
+```{r, echo=TRUE}
+filteredData<-df_injured %>% filter(TOTAL > 20)
+
+ type<-"PEDESTRIANS.INJURED"
+ pedestrianInjured1 <-geo_plot_2(map,filteredData,type)
+ pedestrianInjured1
+
+```
+
+
+
+### Cyclists
+```{r, echo=TRUE}
+ type<-"CYCLIST.INJURED"
+ cyclistInjured <-geo_plot(map,df_injured,type)
+ cyclistInjured
+```
+
+
+### Over 15 cyclists injured
+```{r, echo=TRUE}
+filteredData<-df_injured %>% filter(TOTAL > 15)
+
+
+ type<-"CYCLIST.INJURED"
+ cyclistInjured1 <-geo_plot_2(map,filteredData,type)
+ cyclistInjured1
+
+```
+
+
+### Motorists
+```{r, echo=TRUE}
+
+ type<-"MOTORIST.INJURED"
+ motoristInjured <-geo_plot(map,df_injured,type)
+ motoristInjured
+
+```   
+
+
+### Over 110 motorists injured
+```{r, echo=TRUE}
+filteredData<-df_injured %>% filter(TOTAL > 110)
+
+
+ type<-"MOTORIST.INJURED"
+ motoristInjured1 <-geo_plot_2(map,filteredData,type)
+ motoristInjured1
+
+```
+
+
+## Deaths Location
+
+
+```{r, echo=TRUE}
+
+df_killed <- data[,c("LATITUDE","LONGITUDE","PEDESTRIANS.KILLED","CYCLIST.KILLED","MOTORIST.KILLED")] %>% gather(TYPE,VALUE,3:5) %>% na.omit() %>% group_by(LATITUDE,LONGITUDE,TYPE) %>% summarise(TOTAL=sum(VALUE,na.rm=T)) %>% filter(TOTAL!=0)
+
+```
+
+
+### Pedestrians
+```{r, echo=TRUE}
+
+ type<-"PEDESTRIANS.KILLED"
+ pedestrianKilled <-geo_plot(map,df_killed,type)
+ pedestrianKilled
+
+```
+
+
+### Over 4 pedestrians killed
+```{r, echo=TRUE}
+filteredData<-df_killed %>% filter(TOTAL > 3)
+
+ type<-"PEDESTRIANS.KILLED"
+ pedestrianKilled1 <-geo_plot_2(map,filteredData,type)
+ pedestrianKilled1
+
+```
+
+
+### Cyclists 
+```{r, echo=TRUE}
+
+ type<-"CYCLIST.KILLED"
+ cyclistKilled <-geo_plot(map,df_killed,type)
+ cyclistKilled
+
+```
+
+
+### 2 cyclists killed
+```{r, echo=TRUE}
+filteredData<-df_killed %>% filter(TOTAL > 1)
+  
+ type<-"CYCLIST.KILLED"
+ cyclistKilled1 <-geo_plot_2(map,filteredData,type)
+ cyclistKilled1
+
+```
+
+
+### Motorists 
+```{r, echo=TRUE}
+
+ type<-"MOTORIST.KILLED"
+ motoristKilled <-geo_plot(map,df_killed,type)
+ motoristKilled
+
+```
+
+
+### Over 3 motorists killed
+```{r, echo=TRUE}
+filteredData<-df_killed %>% filter(TOTAL > 3)
+
+ type<-"MOTORIST.KILLED"
+ motoristKilled <-geo_plot_2(map,filteredData,type)
+ motoristKilled
+
+```
+
+
+
+# Contributing Factors Analysis
+
+```{r, echo=TRUE}
+
+factorData <- data_copy %>% select(PERSONS.KILLED,PERSONS.INJURED,CONTRIBUTING.FACTOR.VEHICLE.1,CONTRIBUTING.FACTOR.VEHICLE.2,CONTRIBUTING.FACTOR.VEHICLE.3,CONTRIBUTING.FACTOR.VEHICLE.4,CONTRIBUTING.FACTOR.VEHICLE.5) %>% gather(TYPE,VALUE,1:2) %>% gather(VEHICLE_TYPE,CAUSE,1:5) %>% filter(VALUE!=0,CAUSE!="",CAUSE!="Unspecified")
+
+
+factorData1 <- factorData %>% select(-VEHICLE_TYPE) %>% group_by(TYPE,CAUSE) %>% summarise(TOTAL=sum(VALUE,na.rm=T))
+
+
+cause_plot(factorData1)
+
+
+```   
+
+
+
+## Unsafe speed locations
+
+```{r, echo=TRUE}
+
+cause <- "Unsafe Speed"
+causeLocation<- create_cause_dataset(data_copy,cause)
+df1<-causeLocation[,c("LATITUDE", "LONGITUDE", "BOROUGH")]
+ggmap(map) + geom_point(data = df1, aes(x = LONGITUDE, y = LATITUDE, color=BOROUGH), size = 3, shape = 1)
+
+
+```
+
+
+# Further Analysis Suggestions  
+
+## Clustering
+```{r, echo=TRUE}
+
+locationDF<-data[,c("LATITUDE","LONGITUDE")]
+locationDF<-locationDF[complete.cases(locationDF),]
+
+```
+
+
+
+```{r, echo=TRUE}
+
+km<-kmeans(locationDF, 5)
+locationDF$CLUSTER<-as.factor(km$cluster)
+
+ggmap(map) + geom_point(data = locationDF, aes(x = LONGITUDE, y = LATITUDE, color=CLUSTER), size = 3, shape = 1)
+
+```
+
+
+
+```{r echo=TRUE}
+
+num1<-subset(num, select=-c(PERSONS.KILLED, PERSONS.INJURED))
+km<-kmeans(num1, 3)
+num1$CLUSTER<-as.factor(km$cluster)
+
+ggmap(map) + geom_point(data = num1, aes(x = LONGITUDE, y = LATITUDE, color=CLUSTER), size = 3, shape = 1)
+
+
+```
+
+# Summary of Analysis
+
+This comprehensive analysis provided answers for questions below:
+
+
+**1. When collisions happen the most frequently? Is it correlated with specific months or weekdays?** 
+
+Collisions happen mostly frequently in the middle of the week.
+
+Time: there is a high amount of collisions  at 8AM and 4PM. The biggest amount of collisions happen, when people come back from work. However, we can notice that amount of collisions in night increases during weekend.
+
+**2. Where collisions appear the most frequently? Which boroughs are the most dangerous?**
+
+The biggest amount of accidents we can notice in downtown of Manhattan and the smallest amount - in Staten Island.
+
+**3. What are the main factors that contribute collisions in NYC?**
+
+Main factors are: Distraction, Failure to Yield Right-of-Way and Traffic Control Disregarded.
+
